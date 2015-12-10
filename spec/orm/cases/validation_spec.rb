@@ -58,6 +58,15 @@ shared_examples_for "validateable massive record model" do
       @model.class.stub(:new).and_return(@model)
       lambda { @model.class.create! }.should raise_error MassiveRecord::ORM::RecordInvalid
     end
+
+    describe ":on option" do
+      before { @model.consider_carma = true }
+
+      it "takes :on => create into consideration" do
+        @model.should_not be_valid
+        @model.errors[:carma].length.should eq 1
+      end
+    end
   end
 end
 
@@ -66,7 +75,7 @@ describe "MassiveRecord::Base::Table" do
   include MockMassiveRecordConnection
 
   before do
-    @model = Person.new :id => "1", :name => "Alice", :email => "alice@gmail.com", :age => 20
+    @model = Person.new "1", :name => "Alice", :email => "alice@gmail.com", :age => 20
     @invalidate_model = Proc.new { |p| p.name = nil }
   end
 
@@ -84,7 +93,7 @@ end
   #include MockMassiveRecordConnection
 
   #before do
-    #@model = Address.new :id => "1", :street => "Henrik Ibsens gate 1"
+    #@model = Address.new "1", :street => "Henrik Ibsens gate 1"
     #@invalidate_model = Proc.new { |a| a.street = nil }
   #end
 

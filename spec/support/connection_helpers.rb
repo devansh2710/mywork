@@ -6,7 +6,10 @@ module SetUpHbaseConnectionBeforeAll
   included do
     before(:all) do
       unless @connection
-        @connection_configuration = {:host => MR_CONFIG['host'], :port => MR_CONFIG['port']}
+        @connection_configuration = {
+          :host => MR_CONFIG['host'], 
+          :port => MR_CONFIG['port']
+        }
         MassiveRecord::ORM::Base.connection_configuration = @connection_configuration
         @connection = MassiveRecord::Wrapper::Connection.new(@connection_configuration)
         @connection.open
@@ -39,11 +42,14 @@ module CreatePersonBeforeEach
     before do
       @table = MassiveRecord::Wrapper::Table.new(@connection, Person.table_name)
       @table.column_families.create(:info)
+      @table.column_families.create(:base)
+      @table.column_families.create(:addresses)
+      @table.column_families.create(:addresses_with_timestamp)
       @table.save
       
       @row = MassiveRecord::Wrapper::Row.new
       @row.id = "ID1"
-      @row.values = {:info => {:name => "John Doe", :email => "john@base.com", :age => "20", :test_class_ids => [].to_json}}
+      @row.values = {:info => {:name => "John Doe", :email => "john@base.com", :age => "20", :test_class_ids => [].to_json}, :base => {:phone_numbers => [].to_json}}
       @row.table = @table
       @row.save
     end
@@ -60,11 +66,12 @@ module CreatePeopleBeforeEach
     before do
       @table = MassiveRecord::Wrapper::Table.new(@connection, Person.table_name)
       @table.column_families.create(:info)
+      @table.column_families.create(:base)
+      @table.column_families.create(:addresses)
+      @table.column_families.create(:addresses_with_timestamp)
       @table.save
       
-      @table_size = 9
-      
-      @table_size.times.each do |id|
+      9.times.each do |id|
         @row = MassiveRecord::Wrapper::Row.new
         @row.id = id + 1
         @row.values = {:info => {:name => "John Doe", :email => "john@doe.com", :age => "20"}}

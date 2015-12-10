@@ -1,11 +1,14 @@
+require 'massive_record/orm/persistence/operations'
+
 module MassiveRecord
   module ORM
     module Persistence
       extend ActiveSupport::Concern
 
+
       module ClassMethods
-        def create(attributes = {})
-          new(attributes).tap do |record|
+        def create(*args)
+          new(*args).tap do |record|
             record.save
           end
         end
@@ -30,7 +33,7 @@ module MassiveRecord
 
 
       def reload
-        self.attributes_raw = self.class.find(id).attributes if persisted?
+        Operations.reload(self).execute
         self
       end
       
@@ -43,7 +46,7 @@ module MassiveRecord
       end
 
       def update_attribute(attr_name, value)
-        send("#{attr_name}=", value)
+        self[attr_name] = value
         save(:validate => false)
       end
 
@@ -64,11 +67,31 @@ module MassiveRecord
       end
 
       def destroy
-        @destroyed = (persisted? ? row_for_record.destroy : true) and freeze
+        @destroyed = (persisted? ? do_destroy : true) and freeze
       end
       alias_method :delete, :destroy
 
 
+      def change_id!(new_id)
+        old_id, self.id = id, new_id
+
+        @new_record = true
+        unless save
+          raise <<-TXT
+            Unable to save #{self.class} with updated id '#{new_id}'.
+            Old id '#{old_id}' was not deleted so in theory nothing should be changed in the database.
+          TXT
+        end
+
+        unless self.class.find(old_id).destroy
+          raise <<-TXT
+            Unable to destroy #{self.class} with id '#{old_id}'.
+            You now how duplicate records in the database. New id is: '#{new_id}.'
+          TXT
+        end
+
+        reload
+      end
 
 
       def increment(attr_name, by = 1)
@@ -82,18 +105,10 @@ module MassiveRecord
         increment(attr_name, by).update_attribute(attr_name, self[attr_name])
       end
 
-      # Atomic increment of an attribute. Please note that it's the
-      # adapter (or the wrapper) which needs to guarantee that the update
-      # is atomic, and as of writing this the Thrift adapter / wrapper does
-      # not do this anatomic.
       def atomic_increment!(attr_name, by = 1)
-        ensure_that_we_have_table_and_column_families!
-        attr_name = attr_name.to_s
-
-        row = row_for_record
-        row.values = attributes_to_row_values_hash([attr_name])
-        self[attr_name] = row.atomic_increment(attributes_schema[attr_name].unique_name, by).to_i
+        atomic_operation(:increment, attr_name, by)
       end
+
 
       def decrement(attr_name, by = 1)
         raise NotNumericalFieldError unless attributes_schema[attr_name.to_s].type == :integer
@@ -105,6 +120,11 @@ module MassiveRecord
       def decrement!(attr_name, by = 1)
         decrement(attr_name, by).update_attribute(attr_name, self[attr_name])
       end
+
+      def atomic_decrement!(attr_name, by = 1)
+        atomic_operation(:decrement, attr_name, by)
+      end
+
       
 
       private
@@ -112,88 +132,41 @@ module MassiveRecord
 
       def create_or_update
         raise ReadOnlyRecord if readonly?
+
         !!(new_record? ? create : update)
       end
 
       def create
-        ensure_that_we_have_table_and_column_families!
-
-        if saved = store_record_to_database('create')
-          @new_record = false
+        Operations.insert(self).execute.tap do |saved|
+          @new_record = false if saved
         end
-        saved
       end
 
-      def update(attribute_names_to_update = attributes.keys)
-        ensure_that_we_have_table_and_column_families!
-
-        store_record_to_database('update', attribute_names_to_update)
+      def update(attribute_names_to_update = attributes_with_embedded)
+        Operations.update(self, :attribute_names_to_update => attribute_names_to_update).execute
       end
 
-
-
-
-      #
-      # Takes care of the actual storing of the record to the database
-      # Both update and create is using this
-      #
-      def store_record_to_database(action, attribute_names_to_update = [])
-        row = row_for_record
-        row.values = attributes_to_row_values_hash(attribute_names_to_update)
-        row.save
-      end
-
-
-      #
-      # Iterates over tables and column families and ensure that we
-      # have what we need
-      #
-      def ensure_that_we_have_table_and_column_families!
-        if !self.class.connection.tables.include? self.class.table_name
-          missing_family_names = calculate_missing_family_names
-          self.class.table.create_column_families(missing_family_names) unless missing_family_names.empty?
-          self.class.table.save
-        end
-
-        raise ColumnFamiliesMissingError.new(self.class, calculate_missing_family_names) if !calculate_missing_family_names.empty?
-      end
-      
-      #
-      # Calculate which column families are missing in the database in
-      # context of what the schema instructs.
-      #
-      def calculate_missing_family_names
-        existing_family_names = self.class.table.fetch_column_families.collect(&:name) rescue []
-        expected_family_names = column_families ? column_families.collect(&:name) : []
-
-        expected_family_names.collect(&:to_s) - existing_family_names.collect(&:to_s)
+      def do_destroy
+        Operations.destroy(self).execute
       end
 
       #
-      # Returns a Wrapper::Row class which we can manipulate this
-      # record in the database with
+      # Atomic decrement of an attribute. Please note that it's the
+      # adapter (or the wrapper) which needs to guarantee that the update
+      # is atomic. Thrift adapter is working with atomic decrementation.
       #
-      def row_for_record
-        raise IdMissing.new("You must set an ID before save.") if id.blank?
-
-        MassiveRecord::Wrapper::Row.new({
-          :id => id,
-          :table => self.class.table
-        })
+      def atomic_operation(operation, attr_name, by)
+        Operations.atomic_operation(self, :operation => operation, :attr_name => attr_name, :by => by).execute
       end
 
-      #
-      # Returns attributes on a form which Wrapper::Row expects
-      #
-      def attributes_to_row_values_hash(only_attr_names = [])
-        values = Hash.new { |hash, key| hash[key] = Hash.new }
 
-        attributes_schema.each do |attr_name, orm_field|
-          next unless only_attr_names.empty? || only_attr_names.include?(attr_name)
-          values[orm_field.column_family.name][orm_field.column] = orm_field.encode(send(attr_name))
-        end
 
-        values
+      #
+      # Gives you all attribute names pluss all known embedded
+      # attributes names. Is used if dirty is active.
+      #
+      def attributes_with_embedded
+        attributes.keys | relation_proxies_for_embedded.collect { |proxy| proxy.metadata.name }
       end
     end
   end

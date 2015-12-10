@@ -24,8 +24,8 @@ module MassiveRecord
 
 
       module ClassMethods
-        def create!(attributes = {})
-          record = new(attributes)
+        def create!(*args)
+          record = new(*args)
           record.save!
           record
         end
@@ -40,6 +40,10 @@ module MassiveRecord
         perform_validation(options) ? super : raise(RecordInvalid.new(self))
       end
 
+      def valid?(context = nil)
+        context ||= (new_record? ? :create : :update)
+        super
+      end
 
       private
 

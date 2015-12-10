@@ -33,10 +33,67 @@ module MassiveRecord
 
 
         module ClassMethods
+          protected
+
+          # Redefine reader method if we are to do time zone configuration on field
+          def define_method_attribute(attr_name)
+            if time_zone_conversion_on_field?(attributes_schema[attr_name])
+              internal_read_method = "_#{attr_name}"
+
+              if attr_name =~ ActiveModel::AttributeMethods::COMPILABLE_REGEXP
+                generated_attribute_methods.module_eval <<-RUBY, __FILE__, __LINE__
+                  def #{internal_read_method}
+                    if time = decode_attribute('#{attr_name}', @attributes['#{attr_name}'])
+                      time.in_time_zone
+                    end
+                  end
+
+                  alias #{attr_name} #{internal_read_method}
+                RUBY
+              else
+                generated_attribute_methods.send(:define_method, internal_read_method) do
+                  if time = decode_attribute(attr_name, @attributes[attr_name])
+                    time.in_time_zone
+                  end
+                end
+                alias_method attr_name, internal_read_method
+              end
+            else
+              super
+            end
+          end
+
+          def define_method_attribute=(attr_name)
+            if time_zone_conversion_on_field?(attributes_schema[attr_name])
+              internal_write_method = "_#{attr_name}="
+
+              if attr_name =~ ActiveModel::AttributeMethods::COMPILABLE_REGEXP
+                generated_attribute_methods.module_eval <<-RUBY, __FILE__, __LINE__
+                  def #{internal_write_method}(time)
+                    time = Time.zone.parse(time) if time.is_a? String
+                    #{attr_name}_will_change! if will_change_attribute? #{attr_name}, time
+                    @attributes['#{attr_name}'] = time
+                  end
+                  alias #{attr_name}= #{internal_write_method}
+                RUBY
+              else
+                generated_attribute_methods.send(:define_method, internal_write_method) do |time|
+                  time = Time.zone.parse(time) if time.is_a? String
+                  send("#{attr_name}_will_change!") if will_change_attribute? attr_name, time
+                  @attributes[attr_name] = time
+                end
+                alias_method "#{attr_name}=", internal_write_method
+              end
+            else
+              super
+            end
+          end
+
+
           private
 
           def time_zone_conversion_on_field?(field)
-            time_zone_aware_attributes && !skip_time_zone_conversion_for_attributes.include?(field.name) && field.type == :time
+            field && time_zone_aware_attributes && !skip_time_zone_conversion_for_attributes.include?(field.name) && field.type == :time
           end
         end
       end

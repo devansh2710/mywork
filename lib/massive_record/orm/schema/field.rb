@@ -13,9 +13,9 @@ module MassiveRecord
           :hash => {},
           :date => lambda { Date.today },
           :time => lambda { Time.now }
-        }
+        }.freeze
 
-        TYPES = TYPES_DEFAULTS_TO.keys
+        TYPES = TYPES_DEFAULTS_TO.keys.freeze
 
         attr_writer :default
         attr_accessor :name, :column, :type, :fields, :coder, :allow_nil
@@ -28,6 +28,17 @@ module MassiveRecord
           errors.add(:name, :taken) if fields.try(:attribute_name_taken?, name)
         end
 
+
+        def self.type_to_classes
+          unless @type_to_classes
+            @type_to_classes = Hash.new { |h,k| h[k] = [] }
+
+            @type_to_classes[:boolean] << TrueClass << FalseClass
+            @type_to_classes[:integer] << Fixnum << Bignum
+          end
+
+          @type_to_classes
+        end
       
         #
         # Creates a new field based on arguments from DSL
@@ -109,11 +120,13 @@ module MassiveRecord
 
 
         def decode(value)
+          value = value.force_encoding(Encoding::UTF_8) if utf_8_encoded? && !value.frozen? && value.respond_to?(:force_encoding) 
+
           return value if value.nil? || value_is_already_decoded?(value)
           
           value = case type
                   when :boolean
-                    value.blank? ? nil : !value.to_s.match(/^(true|1)$/i).nil?
+                    value.blank? || value == @@encoded_nil_value ? nil : !value.to_s.match(/^(true|1)$/i).nil?
                   when :date
                     value.blank? || value.to_s == "0" ? nil : (Date.parse(value) rescue nil)
                   when :time
@@ -123,7 +136,15 @@ module MassiveRecord
                       value = value.to_s if value.is_a? Symbol
                       coder.load(value)
                     end
-                  when :integer, :float, :array, :hash
+                  when :integer
+                    value = value.force_encoding(Encoding::BINARY)
+
+                    if value =~ /\A\d*\Z/
+                      coder.load(value) if value.present?
+                    else
+                      hex_string_to_integer(value)
+                    end
+                  when :float, :array, :hash
                     coder.load(value) if value.present?
                   else
                     raise "Unable to decode #{value}, class: #{value}"
@@ -135,10 +156,11 @@ module MassiveRecord
         end
 
         def encode(value)
-          if type == :string && !(value.nil? || value == @@encoded_nil_value)
+          if value.nil? || should_not_be_encoded?
             value
           else
-            coder.dump(value)
+            value = value.try(:utc) if Base.time_zone_aware_attributes && field_affected_by_time_zone_awareness?
+            coder.dump(value).to_s
           end
         end
 
@@ -151,11 +173,8 @@ module MassiveRecord
         end
 
         def classes
-          classes = case type
-                    when :boolean
-                      [TrueClass, FalseClass]
-                    when :integer
-                      [Fixnum]
+          classes = if self.class.type_to_classes.has_key? type
+                      self.class.type_to_classes[type]
                     else
                       klass = type.to_s.classify
                       if ::Object.const_defined?(klass)
@@ -169,6 +188,8 @@ module MassiveRecord
         def value_is_already_decoded?(value)
           if type == :string
             value.is_a?(String) && !(value == @@encoded_null_string || value == @@encoded_nil_value)
+          elsif value.acts_like?(type)
+            true
           else
             classes.include?(value.class)
           end
@@ -176,6 +197,22 @@ module MassiveRecord
 
         def loaded_value_is_of_valid_class?(value)
           value.nil? || value.is_a?(String) && value == @@encoded_nil_value || value_is_already_decoded?(value)
+        end
+
+        def field_affected_by_time_zone_awareness?
+          type == :time
+        end
+
+        def hex_string_to_integer(string)
+          Wrapper::Cell.hex_string_to_integer(string)
+        end
+
+        def utf_8_encoded?
+          type != :integer
+        end
+
+        def should_not_be_encoded?
+          [:string, :integer].include?(type)
         end
       end
     end

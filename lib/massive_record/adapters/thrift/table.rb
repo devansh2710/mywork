@@ -5,6 +5,27 @@ module MassiveRecord
         
         attr_accessor :connection, :name, :column_families
     
+        #
+        # TODO
+        # Helper method to inform about changed options. Remove this in next version..
+        # Also note that this method is used other places to wrap same functionality.
+        #
+        def self.warn_and_change_deprecated_finder_options(options)
+          deprecations = {
+            :start => :starts_with
+          }
+
+          deprecations.each do |deprecated, current|
+            if options.has_key? deprecated
+              # TODO remove this for next version
+              ActiveSupport::Deprecation.warn("finder option '#{deprecated}' is deprecated. Please use: '#{current}'")
+              options[current] = options.delete deprecated
+            end
+          end
+          
+          options
+        end
+
         def initialize(connection, table_name)
           @connection = connection
           @name = table_name.to_s
@@ -24,11 +45,18 @@ module MassiveRecord
     
         def save
           begin
-            client.createTable(name, @column_families.collect{|cf| cf.descriptor}).nil?
-          rescue Apache::Hadoop::Hbase::Thrift::AlreadyExists => ex
+            result = client.createTable(name, @column_families.collect{|cf| cf.descriptor}).nil?
+            sleep 0.5
+            @table_exists = true
+            result
+          rescue ::Apache::Hadoop::Hbase::Thrift::AlreadyExists => ex
             "The table already exists."
           rescue => ex
-            raise ex
+            if ex.is_a?(::Apache::Hadoop::Hbase::Thrift::IOError) && ex.message.include?("TableExistsException")
+              "The table already exists."
+            else
+              raise ex
+            end
           end
         end
     
@@ -37,15 +65,25 @@ module MassiveRecord
         end    
     
         def disable
-          client.disableTable(name).nil?
+          if client.isTableEnabled(name)
+            client.disableTable(name).nil?
+          end
         end
     
         def destroy
           disable
-          @table_exists = false
-          client.deleteTable(name).nil?
+          if client.deleteTable(name).nil?
+            sleep 0.5
+            @table_exists = false
+            true
+          else
+            false
+          end
+        rescue => e
+          @table_exists = nil
+          exists? ? raise(e) : true
         end
-    
+      
         def create_column_families(column_family_names)
           column_family_names.each{|name| @column_families.push(ColumnFamily.new(name))}
         end
@@ -87,9 +125,14 @@ module MassiveRecord
         end
       
         def format_options_for_scanner(opts = {})
+          opts = self.class.warn_and_change_deprecated_finder_options(opts)
+
+          start = opts[:starts_with] && opts[:starts_with]
+          offset = opts[:offset] && opts[:offset]
+
           {
-            :start_key  => opts[:start],
-            :offset_key => opts[:offset],
+            :start_key  => start,
+            :offset_key => offset,
             :created_at => opts[:created_at],
             :columns    => opts[:select], # list of column families to fetch from hbase
             :limit      => opts[:limit] || opts[:batch_size]
@@ -115,7 +158,16 @@ module MassiveRecord
         # table.get("my_id", :info, :name) # => "Bob"
         #
         def get(id, column_family_name, column_name)
-          MassiveRecord::Wrapper::Cell.new(:value => connection.get(name, id, "#{column_family_name.to_s}:#{column_name.to_s}").first.value).value
+          get_cell(id, column_family_name, column_name).try :value
+        end
+
+        #
+        # Fast way of fetching one cell
+        #
+        def get_cell(id, column_family_name, column_name)
+          if cell = connection.get(name, id, "#{column_family_name.to_s}:#{column_name.to_s}", {}).first
+            MassiveRecord::Wrapper::Cell.populate_from_tcell(cell)
+          end
         end
         
         #
@@ -124,23 +176,29 @@ module MassiveRecord
         # Returns nil if id is not found
         #
         def find(*args)
-          what_to_find = args.first
+          return nil unless exists?
+
           options = args.extract_options!.symbolize_keys
+          what_to_find = args.first
+          
+          if column_families_to_find = options[:select]
+            column_families_to_find = column_families_to_find.collect { |c| c.to_s }
+          end
 
           if what_to_find.is_a?(Array)
-            what_to_find.collect { |id| find(id, options) }
-          else
-            if column_families_to_find = options[:select]
-              column_families_to_find &= column_family_names
+            connection.getRowsWithColumns(name, what_to_find, column_families_to_find, {}).collect do |t_row_result|
+              Row.populate_from_trow_result(t_row_result, connection, name, column_families_to_find)
             end
-
-            if t_row_result = connection.getRowWithColumns(name, what_to_find, column_families_to_find).first
+          else
+            if t_row_result = connection.getRowWithColumns(name, what_to_find, column_families_to_find, {}).first
               Row.populate_from_trow_result(t_row_result, connection, name, column_families_to_find)
             end
           end
         end
 
-        def find_in_batches(opts = {})        
+        def find_in_batches(opts = {})   
+          return nil unless exists?
+
           results_limit = opts[:limit]
           results_found = 0
           
@@ -160,7 +218,7 @@ module MassiveRecord
         end
     
         def exists?
-          @table_exists ||= connection.tables.include?(name)
+          @table_exists = connection.tables.include?(name)
         end
     
         def regions

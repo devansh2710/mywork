@@ -7,7 +7,7 @@ describe "log subscriber" do
   include SetUpHbaseConnectionBeforeAll
   include SetTableNamesToTestTable
 
-  let(:level) { DEBUG }
+  let(:level) { ActiveSupport::BufferedLogger::Severity::DEBUG }
   subject { ActiveSupport::LogSubscriber::TestHelper::MockLogger.new(level) }
 
   before do
@@ -34,6 +34,7 @@ describe "log subscriber" do
       subject.logged(:debug).size.should be_zero
     end
 
+
     describe "loading records" do
       it "should have one lined log to debug when doing a all" do
         Person.all
@@ -44,31 +45,45 @@ describe "log subscriber" do
       it "should include a the class name of what is loading, time it took, a description about what has been done" do
         Person.all
         wait
-        subject.logged(:debug).first.should match /Person.+?load.+?([\d.]+).+?all/
+        subject.logged(:debug).last.should match /Person.+?load.+?([\d.]+).+?all/
       end
 
-      it "should include class, time and description on first" do
+      it "should have one log line when doing first" do
         Person.first
         wait
-        subject.logged(:debug).first.should match /Person.+?load.+?([\d.]+).+?all.+?options.+?limit=>1/
+        subject.logged(:debug).size.should eq 1
       end
 
-      it "should include id when finding one person" do
-        Person.exists? "id_to_be_found"
+      it "should have some clue written that it is first" do
+        Person.first
         wait
-        subject.logged(:debug).first.should include "id(s): id_to_be_found"
+        subject.logged(:debug).first.should include ":limit=>1"
       end
 
-      it "should not see the options hash if it's empty" do
-        Person.exists? "id_to_be_found"
+      it "should have one log when doing find" do
+        Person.find("dummy") rescue nil
         wait
-        subject.logged(:debug).first.should_not include "{}"
+        subject.logged(:debug).first.should include 'options: ["dummy",'
+      end
+
+
+
+
+      it "includes information about loading from identity map" do
+        MassiveRecord::ORM::IdentityMap.use do
+          person = Person.create! "ID1", :name => "Name", :age => 20
+          Person.find(person.id)
+
+          wait
+          subject.logged(:debug).second.should match /Person.+?loaded from identity map/
+        end
       end
     end
+
     
     describe "store records" do
       before do
-        @person = Person.create! :id => "first", :name => "Name", :age => 20
+        @person = Person.create! "first", :name => "Name", :age => 20
         wait
       end
 
@@ -107,7 +122,7 @@ describe "log subscriber" do
 
 
   context "info" do
-    let(:level) { INFO }
+    let(:level) { ActiveSupport::BufferedLogger::Severity::INFO }
 
     it "should have nothing logged to begin with" do
       subject.logged(:debug).size.should be_zero
